@@ -55,15 +55,17 @@ export const sendMessage = async (text: string, sessionId: string, module?: stri
       throw new Error('Response body is not readable');
     }
 
-    const decoder = new TextDecoder();
+    const decoder = new TextDecoder('utf-8');
     let buffer = '';
+    let isComplete = false;
 
     const processStream = async () => {
       try {
-        while (true) {
+        while (!isComplete) {
           const { done, value } = await reader.read();
           
           if (done) {
+            // 处理剩余的缓冲区数据
             if (buffer.trim()) {
               processChunk(buffer);
             }
@@ -74,15 +76,29 @@ export const sendMessage = async (text: string, sessionId: string, module?: stri
           const chunk = decoder.decode(value, { stream: true });
           buffer += chunk;
 
-          // 处理完整的SSE事件
+          // 检查是否包含结束标记
+          if (buffer.includes('<end></end>')) {
+            isComplete = true;
+          }
+
+          // 处理完整的数据块
           const lines = buffer.split('\n\n');
-          buffer = lines.pop() || ''; // 保留最后一个不完整的部分
+          
+          // 如果没有完成，保留最后一个可能不完整的部分
+          if (!isComplete) {
+            buffer = lines.pop() || '';
+          } else {
+            buffer = '';
+          }
 
           for (const line of lines) {
-            processChunk(line);
+            if (line.trim()) {
+              processChunk(line);
+            }
           }
         }
       } catch (error) {
+        console.error('Stream processing error:', error);
         callbacks?.onError(error);
       }
     };
@@ -90,25 +106,32 @@ export const sendMessage = async (text: string, sessionId: string, module?: stri
     const processChunk = (chunk: string) => {
       if (!chunk.trim()) return;
       
-      // 提取data部分
-      const dataMatch = chunk.match(/^data:\s*(.+)$/m);
-      if (dataMatch && dataMatch[1]) {
-        try {
-          const data = JSON.parse(dataMatch[1]);
-          callbacks?.onData(data);
-        } catch (e) {
-          // 如果不是JSON格式，直接传递文本
-          callbacks?.onData(dataMatch[1]);
+      try {
+        // 移除SSE前缀
+        let cleanChunk = chunk;
+        const dataMatch = chunk.match(/^data:\s*(.+)$/m);
+        if (dataMatch && dataMatch[1]) {
+          cleanChunk = dataMatch[1];
         }
-      } else {
-        // 如果没有data前缀，直接传递整个文本
-        callbacks?.onData(chunk);
+        
+        // 尝试解析JSON
+        try {
+          const data = JSON.parse(cleanChunk);
+          callbacks?.onData(data);
+        } catch (jsonError) {
+          // 如果不是JSON格式，直接传递文本
+          callbacks?.onData(cleanChunk);
+        }
+      } catch (error) {
+        console.error('Chunk processing error:', error);
+        callbacks?.onData(chunk); // 降级处理
       }
     };
 
     processStream();
     return true;
   } catch (error) {
+    console.error('SendMessage error:', error);
     callbacks?.onError(error);
     return false;
   }

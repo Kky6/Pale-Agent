@@ -85,10 +85,12 @@ exports.sendMessage = async (req, res) => {
     const token = authHeader.split(' ')[1];
     
     // 设置响应头，支持流式传输
-    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // 禁用Nginx缓冲
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Cache-Control');
 
     // 准备请求体
     const requestBody = {
@@ -109,22 +111,47 @@ exports.sendMessage = async (req, res) => {
           'Content-Type': 'application/json'
         },
         data: requestBody,
-        responseType: 'stream'
+        responseType: 'stream',
+        timeout: 60000 // 增加超时时间
       });
 
-      // 将API响应流式传输给客户端，确保符合SSE格式
+      let buffer = '';
+      
+      // 将API响应流式传输给客户端
       response.data.on('data', (chunk) => {
-        const chunkStr = chunk.toString();
-        // 检查数据是否已经是SSE格式（以data:开头）
-        if (chunkStr.trim().startsWith('data:')) {
-          res.write(chunk);
-        } else {
-          // 如果不是SSE格式，转换为SSE格式
-          res.write(`data: ${chunkStr}\n\n`);
+        try {
+          const chunkStr = chunk.toString('utf-8');
+          buffer += chunkStr;
+          
+          // 处理完整的数据块
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop() || ''; // 保留最后一个可能不完整的部分
+          
+          for (const line of lines) {
+            if (line.trim()) {
+              // 确保数据格式正确
+              if (line.trim().startsWith('data:')) {
+                res.write(`${line}\n\n`);
+              } else {
+                res.write(`data: ${line}\n\n`);
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Data processing error:', error);
         }
       });
 
       response.data.on('end', () => {
+        // 处理剩余的缓冲区数据
+        if (buffer.trim()) {
+          if (buffer.trim().startsWith('data:')) {
+            res.write(`${buffer}\n\n`);
+          } else {
+            res.write(`data: ${buffer}\n\n`);
+          }
+        }
+        
         // 发送结束标记
         res.write(`data: <end></end>\n\n`);
         res.end();
@@ -151,11 +178,13 @@ exports.sendMessage = async (req, res) => {
     }
   } catch (error) {
     console.error('Server Error:', error.message);
-    res.write(`data: ${JSON.stringify({
-      error: true,
-      message: 'Internal server error',
-      code: '0001'
-    })}\n\n`);
+    if (!res.headersSent) {
+      res.write(`data: ${JSON.stringify({
+        error: true,
+        message: 'Internal server error',
+        code: '0001'
+      })}\n\n`);
+    }
     res.end();
   }
 };

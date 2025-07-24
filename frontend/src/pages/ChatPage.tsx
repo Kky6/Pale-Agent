@@ -187,24 +187,19 @@ const ChatPage: React.FC = () => {
   };
 
   const handleSendMessage = async (content: string) => {
-    if (!activeSessionId) {
-      message.warning('请先创建会话');
-      return;
-    }
+    if (!content.trim() || loading) return;
   
-    // 添加用户消息
     const userMessage: Message = {
       id: uuidv4(),
       role: 'user',
-      content,
+      content: content.trim(),
       timestamp: Date.now()
     };
   
-    // 添加临时的AI消息（加载中）
     const tempAiMessage: Message = {
       id: uuidv4(),
       role: 'assistant',
-      content: '',
+      content: '🤔 正在思考...',
       timestamp: Date.now(),
       isLoading: true
     };
@@ -212,245 +207,303 @@ const ChatPage: React.FC = () => {
     const updatedMessages = [...messages, userMessage, tempAiMessage];
     setMessages(updatedMessages);
   
-    // 更新会话
-    const updatedSessions = sessions.map(session => {
-      if (session.id === activeSessionId) {
-        return {
-          ...session,
-          messages: updatedMessages,
-          updatedAt: Date.now()
-        };
-      }
-      return session;
-    });
-    setSessions(updatedSessions);
-  
     try {
       setLoading(true);
-      let accumulatedData = ''; // 累积所有原始数据
-      let lastThinkingContent = '';
-      let lastMarkdownContent = '';
-      let updateTimer: ReturnType<typeof setTimeout> | null = null; // 防抖定时器
+      let accumulatedContent = '';
+      let currentThinkingContent = '';
+      let currentAnswerContent = '';
+      let lastThinkingLength = 0;
+      let lastAnswerLength = 0;
+      let isInAnswerMode = false;
+      let thinkingComplete = false;
+      let thinkingStartTime = Date.now();
   
+      // 添加实时更新计时器
+      const updateTimer = setInterval(() => {
+        if (!thinkingComplete && currentThinkingContent) {
+          const thinkingTime = Math.floor((Date.now() - thinkingStartTime) / 1000);
+          const formattedThinking = currentThinkingContent.replace(/\n/g, '\n> ');
+          const displayContent = `🤔 **正在思考中... (${thinkingTime}s)**\n\n> 💭 ${formattedThinking}`;
+          
+          setMessages(prevMessages => 
+            prevMessages.map(msg => 
+              msg.id === tempAiMessage.id 
+                ? { ...msg, content: displayContent }
+                : msg
+            )
+          );
+        }
+      }, 500); // 每500ms更新一次
+  
+      // 改进的安全解码函数
+      const safeDecodeURIComponent = (str: string): string => {
+        if (!str) return '';
+        
+        let decoded = str;
+        let attempts = 0;
+        const maxAttempts = 10; // 增加最大尝试次数
+        
+        while (attempts < maxAttempts) {
+          try {
+            const newDecoded = decodeURIComponent(decoded);
+            if (newDecoded === decoded) {
+              // 没有更多编码需要解码
+              break;
+            }
+            decoded = newDecoded;
+            attempts++;
+          } catch (e) {
+            console.warn(`解码失败 (尝试 ${attempts + 1}):`, e);
+            // 如果解码失败，尝试替换常见的编码字符
+            try {
+              decoded = decoded
+                .replace(/%20/g, ' ')
+                .replace(/%22/g, '"')
+                .replace(/%7B/g, '{')
+                .replace(/%7D/g, '}')
+                .replace(/%5B/g, '[')
+                .replace(/%5D/g, ']')
+                .replace(/%3A/g, ':')
+                .replace(/%2C/g, ',')
+                .replace(/%0A/g, '\n');
+            } catch (replaceError) {
+              console.error('替换编码字符失败:', replaceError);
+            }
+            break;
+          }
+        }
+        
+        return decoded;
+      };
+
+      // 改进的JSON验证函数
+      const isValidJSON = (str: string): boolean => {
+        if (!str || typeof str !== 'string') return false;
+        
+        try {
+          const trimmed = str.trim();
+          if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) {
+            return false;
+          }
+          JSON.parse(trimmed);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
       await sendMessage(content, activeSessionId, model, {
         onData: (data) => {
           try {
             if (typeof data === 'string') {
-              // 累积所有数据，移除可能的引号
-              accumulatedData += data.replace(/^"|"\$/g, '');
+              accumulatedContent += data;
               
-              // 清除之前的定时器
-              if (updateTimer) {
-                clearTimeout(updateTimer);
-              }
+              // 声明 displayContent 变量
+              let displayContent = '';
+              let shouldUpdate = false;
               
-              // 设置防抖定时器，避免频繁更新UI
-              updateTimer = setTimeout(() => {
-                // 尝试提取完整的markdown标签内容
-                const markdownMatches = accumulatedData.match(/<markdown>([^<]*)<\/markdown>/g);
-                if (markdownMatches && markdownMatches.length > 0) {
-                  // 处理最新的markdown内容
-                  const latestMatch = markdownMatches[markdownMatches.length - 1];
-                  const markdownContent = latestMatch.match(/<markdown>([^<]*)<\/markdown>/)?.[1];
-                  
-                  if (markdownContent) {
-                    try {
-                      // 更严格的URI编码完整性检查
-                      const hasIncompleteEncoding = /%(?![0-9A-Fa-f]{2})/g.test(markdownContent) || 
-                                                   /%[0-9A-Fa-f]$/g.test(markdownContent);
-                      
-                      if (hasIncompleteEncoding) {
-                        // URI编码不完整，跳过这次处理
-                        console.log('URI编码不完整，等待更多数据');
-                        return;
+              // 提取所有markdown标签内容
+              const markdownMatches = accumulatedContent.match(/<markdown>([^<]*)<\/markdown>/g);
+              
+              if (markdownMatches && markdownMatches.length > 0) {
+                // 获取最新的markdown内容
+                const latestMarkdown = markdownMatches[markdownMatches.length - 1];
+                const encodedContent = latestMarkdown.match(/<markdown>([^<]*)<\/markdown>/)?.[1];
+                
+                if (encodedContent) {
+                  try {
+                    // 安全解码
+                    const decodedContent = safeDecodeURIComponent(encodedContent);
+                    console.log('解码后内容:', decodedContent);
+                    
+                    // 验证是否为有效JSON
+                    if (!isValidJSON(decodedContent)) {
+                      console.warn('解码后的内容不是有效的JSON，尝试直接显示');
+                      // 如果不是有效JSON，尝试直接作为文本显示
+                      if (decodedContent.length > 0) {
+                        displayContent = decodedContent;
+                        shouldUpdate = true;
                       }
+                    } else {
+                      // 解析JSON
+                      const jsonData = JSON.parse(decodedContent);
                       
-                      // 尝试解码，如果失败则使用原始内容
-                      let decodedContent;
-                      try {
-                        decodedContent = decodeURIComponent(markdownContent);
-                      } catch (decodeError) {
-                        console.warn('URI解码失败，使用原始内容:', decodeError);
-                        decodedContent = markdownContent;
-                      }
-                      
-                      // 尝试解析JSON
-                      let jsonContent;
-                      try {
-                        jsonContent = JSON.parse(decodedContent);
-                      } catch (jsonError) {
-                        console.warn('JSON解析失败，使用文本内容:', jsonError);
-                        // 如果不是有效的JSON，直接显示文本内容
-                        setMessages(prevMessages => 
-                          prevMessages.map(msg => 
-                            msg.id === tempAiMessage.id 
-                              ? { ...msg, content: decodedContent, isLoading: false }
-                              : msg
-                          )
-                        );
-                        return;
-                      }
-                      
-                      if (Array.isArray(jsonContent)) {
-                        let currentThinking = '';
-                        let currentMarkdown = '';
-                        
-                        jsonContent.forEach(item => {
-                          if (item && item.type === 'Thinking') {
-                            // 处理思考过程
-                            if (item.content && item.content.content) {
-                              try {
-                                // 尝试解码思考内容
-                                let thinkingText;
-                                try {
-                                  thinkingText = decodeURIComponent(item.content.content);
-                                } catch (thinkingDecodeError) {
-                                  console.warn('思考内容解码失败:', thinkingDecodeError);
-                                  thinkingText = item.content.content;
-                                }
-                                
-                                // 格式化思考文本
-                                thinkingText = thinkingText
-                                  .replace(/\\n/g, ' ')  // 将\n替换为空格
-                                  .replace(/\n/g, ' ')   // 将换行符替换为空格
-                                  .trim();               // 去除首尾空格
-                                  
-                                const status = item.content.status || 'running';
-                                const time = item.content.time || '';
-                                
-                                if (status === 'running') {
-                                  currentThinking = `🤔 思考中... ${time}\n${thinkingText}`;
-                                } else {
-                                  currentThinking = `💭 思考过程 ${time}\n${thinkingText}`;
-                                }
-                              } catch (thinkingError) {
-                                console.warn('处理思考内容失败:', thinkingError);
-                                // 如果处理失败，尝试直接使用原始内容
-                                const rawContent = item.content.content || '';
-                                currentThinking = `💭 思考过程\n${rawContent}`;
+                      if (Array.isArray(jsonData) && jsonData.length > 0) {
+                        // 处理所有数据项
+                        for (const item of jsonData) {
+                          if (item.type === 'Thinking' && item.content) {
+                            const thinkingContent = item.content;
+                            
+                            if (thinkingContent.status === 'running' || thinkingContent.status === 'done') {
+                              // 安全解码思考内容
+                              let actualContent = safeDecodeURIComponent(thinkingContent.content || '');
+                              
+                              // 只有内容增长时才更新（实现真正的流式效果）
+                              if (actualContent.length > lastThinkingLength) {
+                                currentThinkingContent = actualContent;
+                                lastThinkingLength = actualContent.length;
+                                shouldUpdate = true;
+                              }
+                              
+                              if (thinkingContent.status === 'done') {
+                                thinkingComplete = true;
+                                isInAnswerMode = true;
+                                clearInterval(updateTimer);
+                                shouldUpdate = true;
                               }
                             }
-                          } else if (item && item.type === 'MarkDown') {
-                            // 处理回复内容
-                            if (item.content) {
-                              try {
-                                // 尝试解码回复内容
-                                let markdownText;
-                                try {
-                                  markdownText = decodeURIComponent(item.content);
-                                } catch (markdownDecodeError) {
-                                  console.warn('回复内容解码失败:', markdownDecodeError);
-                                  markdownText = item.content;
-                                }
-                                
-                                currentMarkdown = markdownText
-                                  .replace(/\\n/g, '\n')  // 保留回复内容的换行
-                                  .trim();
-                              } catch (markdownError) {
-                                console.warn('处理回复内容失败:', markdownError);
-                                currentMarkdown = item.content;
-                              }
+                            
+                          } else if ((item.type === 'MarkDown' || item.type === 'markdown') && item.content) {
+                            // 处理回答内容
+                            let answerContent = safeDecodeURIComponent(item.content || '');
+                            
+                            // 美化回答格式
+                            answerContent = answerContent
+                              .replace(/\\n\\n/g, '\n\n')
+                              .replace(/\\n/g, '\n')
+                              .replace(/\\t/g, '\t')
+                              .trim();
+                            
+                            if (answerContent.startsWith('\n')) {
+                              answerContent = answerContent.substring(1);
                             }
-                          }
-                        });
-                        
-                        // 只有当内容真正发生变化时才更新UI
-                        if (currentThinking !== lastThinkingContent || currentMarkdown !== lastMarkdownContent) {
-                          lastThinkingContent = currentThinking;
-                          lastMarkdownContent = currentMarkdown;
-                          
-                          let displayContent = '';
-                          if (currentThinking) {
-                            displayContent += currentThinking;
-                          }
-                          if (currentMarkdown) {
-                            if (displayContent) displayContent += '\n\n---\n\n';
-                            displayContent += currentMarkdown;
-                          }
-                          
-                          if (displayContent) {
-                            setMessages(prevMessages => 
-                              prevMessages.map(msg => 
-                                msg.id === tempAiMessage.id 
-                                  ? { 
-                                      ...msg, 
-                                      content: displayContent, 
-                                      isLoading: currentThinking.includes('思考中') && !currentMarkdown
-                                    }
-                                  : msg
-                              )
-                            );
+                            
+                            // 只有内容增长时才更新
+                            if (answerContent.length > lastAnswerLength) {
+                              currentAnswerContent = answerContent;
+                              lastAnswerLength = answerContent.length;
+                              isInAnswerMode = true;
+                              shouldUpdate = true;
+                            }
                           }
                         }
                       }
-                    } catch (parseError) {
-                      // 解析失败，可能是数据还不完整，继续等待更多数据
-                      console.warn('解析数据失败，等待更多数据:', (parseError as Error).message);
+                    }
+                    
+                    // 构建最终显示内容 - 使用纯Markdown格式
+                    if (isInAnswerMode && currentAnswerContent) {
+                      // 回答模式：显示完整思考 + 流式回答
+                      const thinkingDisplay = currentThinkingContent ? 
+                        `> 💭 **思考过程：**\n> \n> ${currentThinkingContent.replace(/\n/g, '\n> ')}\n\n---\n\n` : '';
+                      
+                      displayContent = thinkingDisplay + currentAnswerContent;
+                      shouldUpdate = true; // 确保回答内容总是更新
+                      
+                    } else if (currentThinkingContent && !thinkingComplete) {
+                      // 思考模式：流式显示思考过程
+                      const thinkingTime = Math.floor((Date.now() - thinkingStartTime) / 1000);
+                      const formattedThinking = currentThinkingContent.replace(/\n/g, '\n> ');
+                      displayContent = `🤔 **正在思考中... (${thinkingTime}s)**\n\n> 💭 ${formattedThinking}`;
+                      shouldUpdate = true; // 确保思考内容总是更新
+                      
+                    } else if (thinkingComplete && !currentAnswerContent) {
+                      // 思考完成，等待回答
+                      const thinkingDisplay = currentThinkingContent ? 
+                        `> 💭 **思考过程：**\n> \n> ${currentThinkingContent.replace(/\n/g, '\n> ')}\n\n---\n\n` : '';
+                      
+                      displayContent = thinkingDisplay + '✅ **思考完成，正在生成回答...**';
+                      shouldUpdate = true;
+                    }
+                    
+                  } catch (parseError) {
+                    console.error('解析错误:', parseError);
+                    
+                    // 降级处理：直接显示原始内容
+                    if (encodedContent && encodedContent.length > 0) {
+                      displayContent = `🤔 正在处理内容...\n\n${encodedContent.substring(0, 200)}${encodedContent.length > 200 ? '...' : ''}`;
+                      shouldUpdate = true;
                     }
                   }
                 }
-              }, 200); // 增加防抖时间，减少UI更新频率
-            } else if (data && typeof data === 'object') {
-              if (data.content) {
-                setMessages(prevMessages => 
-                  prevMessages.map(msg => 
-                    msg.id === tempAiMessage.id 
-                      ? { ...msg, content: data.content, isLoading: false }
-                      : msg
-                  )
-                );
               }
+              
+              // 检查是否完成
+              const isComplete = accumulatedContent.includes('<end></end>');
+              
+              // 强制更新UI - 移除shouldUpdate限制，确保实时显示
+              setMessages(prevMessages => 
+                prevMessages.map(msg => 
+                  msg.id === tempAiMessage.id 
+                    ? { 
+                        ...msg, 
+                        content: displayContent || '🤔 正在思考...',
+                        isLoading: !isComplete
+                      }
+                    : msg
+                )
+              );
             }
           } catch (error) {
-            console.error('处理响应数据错误:', error);
-          }
-        },
-          onError: (error) => {
-            console.error('发送消息错误:', error);
-            message.error('发送消息失败，请重试');
-            
+            console.error('onData处理错误:', error);
+            // 确保即使出错也能显示一些内容
             setMessages(prevMessages => 
               prevMessages.map(msg => 
                 msg.id === tempAiMessage.id 
-                  ? { ...msg, content: '抱歉，发送消息时出现错误，请重试。', isLoading: false }
+                  ? { 
+                      ...msg, 
+                      content: '⚠️ 内容处理中遇到问题，请稍候...',
+                      isLoading: true
+                    }
                   : msg
               )
             );
-          },
-          onComplete: () => {
-            setLoading(false);
-            
-            // 完成时移除加载状态
-            setMessages(prevMessages => {
-              const updatedMessages = prevMessages.map(msg => 
-                msg.id === tempAiMessage.id 
-                  ? { ...msg, isLoading: false }
-                  : msg
-              );
-              
-              // 同时更新会话
-              const finalSessions = sessions.map(session => {
-                if (session.id === activeSessionId) {
-                  return {
-                    ...session,
-                    messages: updatedMessages,
-                    updatedAt: Date.now()
-                  };
-                }
-                return session;
-              });
-              setSessions(finalSessions);
-              
-              return updatedMessages;
-            });
           }
-        });
-      } catch (error) {
-        console.error('发送消息错误:', error);
-        message.error('发送消息失败，请重试');
-        setLoading(false);
-      }
-    };
+        },
+        onError: (error) => {
+          console.error('发送消息错误:', error);
+          message.error('发送消息失败，请重试');
+          
+          setMessages(prevMessages => 
+            prevMessages.map(msg => 
+              msg.id === tempAiMessage.id 
+                ? { ...msg, content: '❌ 发送失败，请重试', isLoading: false }
+                : msg
+            )
+          );
+          setLoading(false);
+        },
+        onComplete: () => {
+          console.log('流式传输完成');
+          setLoading(false);
+          
+          setMessages(prevMessages => 
+            prevMessages.map(msg => 
+              msg.id === tempAiMessage.id 
+                ? { ...msg, isLoading: false }
+                : msg
+            )
+          );
+          
+          // 保存会话
+          if (activeSessionId) {
+            const finalContent = currentAnswerContent || currentThinkingContent || '回答完成';
+            const sessionPreview = finalContent.replace(/<[^>]*>/g, '').substring(0, 50) + '...';
+            
+            setSessions(prevSessions => 
+              prevSessions.map(session => 
+                session.id === activeSessionId
+                  ? { ...session, preview: sessionPreview, updatedAt: Date.now() }
+                  : session
+              )
+            );
+          }
+        }
+      });
+    } catch (error) {
+      console.error('发送消息失败:', error);
+      message.error('发送消息失败，请重试');
+      
+      setMessages(prevMessages => 
+        prevMessages.map(msg => 
+          msg.id === tempAiMessage.id 
+            ? { ...msg, content: '❌ 发送失败，请重试', isLoading: false }
+            : msg
+        )
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
 
     const handleModelChange = (value: string) => {
       setModel(value);
@@ -486,8 +539,6 @@ const ChatPage: React.FC = () => {
         console.error('RAG检索错误:', error);
         message.error('检索失败，请重试');
         setRagResults([]);
-      } finally {
-        setRagLoading(false);
       }
     };
 
@@ -661,4 +712,20 @@ const ChatPage: React.FC = () => {
     );
   };
 
+  const isValidEncodedString = (str: string): boolean => {
+    // 检查是否包含不完整的URI编码
+    return !/%(?![0-9A-Fa-f]{2})/g.test(str) && !/%[0-9A-Fa-f]$/g.test(str);
+  };
+
+  const safeDecodeURIComponent = (str: string): string => {
+  try {
+    return decodeURIComponent(str);
+  } catch (e) {
+    console.warn('URI解码失败，使用原始内容:', e);
+    return str; // ✅ 添加返回语句
+  }
+};
+
   export default ChatPage;
+
+  
