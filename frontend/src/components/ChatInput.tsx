@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import { Input, Button, Space } from 'antd';
+import { Input, Button, Space, Tooltip } from 'antd';
 import { SendOutlined, SearchOutlined } from '@ant-design/icons';
 import styled from 'styled-components';
 
@@ -32,14 +32,43 @@ const StyledTextArea = styled(Input.TextArea)`
   }
 `;
 
+const RagButton = styled(Button)`
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: none;
+  color: white;
+  font-weight: 500;
+  
+  &:hover {
+    background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  }
+  
+  &:disabled {
+    background: #f5f5f5;
+    color: #bfbfbf;
+    transform: none;
+    box-shadow: none;
+  }
+`;
+
 interface ChatInputProps {
   onSend: (message: string) => void;
   onSearch?: (query: string) => void;
+  onInputChange?: (value: string) => void;
   loading?: boolean;
 }
 
-const ChatInput: React.FC<ChatInputProps> = ({ onSend, onSearch, loading = false }) => {
+const ChatInput: React.FC<ChatInputProps> = ({ onSend, onSearch, onInputChange, loading = false }) => {
   const [message, setMessage] = useState('');
+
+  const handleMessageChange = (value: string) => {
+    setMessage(value);
+    if (onInputChange) {
+      onInputChange(value);
+    }
+  };
 
   const handleSend = () => {
     if (message.trim() && !loading) {
@@ -48,7 +77,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onSearch, loading = false
     }
   };
 
-  const handleSearch = () => {
+  const handleRagSearch = () => {
     if (message.trim() && !loading && onSearch) {
       onSearch(message);
     }
@@ -66,21 +95,23 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onSearch, loading = false
       <Space.Compact style={{ width: '100%' }}>
         <StyledTextArea
           value={message}
-          onChange={(e) => setMessage(e.target.value)}
+          onChange={(e) => handleMessageChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="输入消息..."
+          placeholder="输入问题，使用RAG检索获得更准确的答案..."
           autoSize={{ minRows: 1, maxRows: 4 }}
           disabled={loading}
         />
         {onSearch && (
-          <Button 
-            icon={<SearchOutlined />} 
-            onClick={handleSearch} 
-            disabled={!message.trim() || loading}
-            style={{ marginLeft: 8 }}
-          >
-            检索
-          </Button>
+          <Tooltip title="RAG智能检索 - 基于知识库提供精准答案">
+            <RagButton 
+              icon={<SearchOutlined />} 
+              onClick={handleRagSearch}
+              disabled={!message.trim() || loading}
+              style={{ marginLeft: 8 }}
+            >
+              RAG检索
+            </RagButton>
+          </Tooltip>
         )}
         <Button 
           type="primary" 

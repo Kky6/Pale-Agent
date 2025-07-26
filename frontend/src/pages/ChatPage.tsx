@@ -13,10 +13,63 @@ import ModelSelector from '../components/ModelSelector';
 import RagResults from '../components/RagResults';
 
 import { createChat, sendMessage, ragSearch, setToken } from '../services/api';
-import type { Session } from '../types';
-import type { Message } from '../types';
+import type { Session, Message, RagResult } from '../types';
 
 const { Title, Text } = Typography;
+
+// 工具函数移到组件外部，避免重复定义
+const safeDecodeURIComponent = (str: string): string => {
+  if (!str) return '';
+  
+  let decoded = str;
+  let attempts = 0;
+  const maxAttempts = 10;
+  
+  while (attempts < maxAttempts) {
+    try {
+      const newDecoded = decodeURIComponent(decoded);
+      if (newDecoded === decoded) {
+        break;
+      }
+      decoded = newDecoded;
+      attempts++;
+    } catch (e) {
+      console.warn(`解码失败 (尝试 ${attempts + 1}):`, e);
+      try {
+        decoded = decoded
+          .replace(/%20/g, ' ')
+          .replace(/%22/g, '\"')
+          .replace(/%7B/g, '{')
+          .replace(/%7D/g, '}')
+          .replace(/%5B/g, '[')
+          .replace(/%5D/g, ']')
+          .replace(/%3A/g, ':')
+          .replace(/%2C/g, ',')
+          .replace(/%0A/g, '\n');
+      } catch (replaceError) {
+        console.error('替换编码字符失败:', replaceError);
+      }
+      break;
+    }
+  }
+  
+  return decoded;
+};
+
+const isValidJSON = (str: string): boolean => {
+  if (!str || typeof str !== 'string') return false;
+  
+  try {
+    const trimmed = str.trim();
+    if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) {
+      return false;
+    }
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const ChatContainerWrapper = styled.div`
   display: flex;
@@ -97,6 +150,7 @@ const ChatPage: React.FC = () => {
   const [ragLoading, setRagLoading] = useState(false);
   const [useRag, setUseRag] = useState(false);
   const [useCommonRag, setUseCommonRag] = useState(false);
+  const [currentInput, setCurrentInput] = useState('');
   
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const [form] = Form.useForm();
@@ -234,63 +288,6 @@ const ChatPage: React.FC = () => {
           );
         }
       }, 500); // 每500ms更新一次
-  
-      // 改进的安全解码函数
-      const safeDecodeURIComponent = (str: string): string => {
-        if (!str) return '';
-        
-        let decoded = str;
-        let attempts = 0;
-        const maxAttempts = 10; // 增加最大尝试次数
-        
-        while (attempts < maxAttempts) {
-          try {
-            const newDecoded = decodeURIComponent(decoded);
-            if (newDecoded === decoded) {
-              // 没有更多编码需要解码
-              break;
-            }
-            decoded = newDecoded;
-            attempts++;
-          } catch (e) {
-            console.warn(`解码失败 (尝试 ${attempts + 1}):`, e);
-            // 如果解码失败，尝试替换常见的编码字符
-            try {
-              decoded = decoded
-                .replace(/%20/g, ' ')
-                .replace(/%22/g, '"')
-                .replace(/%7B/g, '{')
-                .replace(/%7D/g, '}')
-                .replace(/%5B/g, '[')
-                .replace(/%5D/g, ']')
-                .replace(/%3A/g, ':')
-                .replace(/%2C/g, ',')
-                .replace(/%0A/g, '\n');
-            } catch (replaceError) {
-              console.error('替换编码字符失败:', replaceError);
-            }
-            break;
-          }
-        }
-        
-        return decoded;
-      };
-
-      // 改进的JSON验证函数
-      const isValidJSON = (str: string): boolean => {
-        if (!str || typeof str !== 'string') return false;
-        
-        try {
-          const trimmed = str.trim();
-          if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) {
-            return false;
-          }
-          JSON.parse(trimmed);
-          return true;
-        } catch {
-          return false;
-        }
-      };
 
       await sendMessage(content, activeSessionId, model, {
         onData: (data) => {
@@ -298,7 +295,6 @@ const ChatPage: React.FC = () => {
             if (typeof data === 'string') {
               accumulatedContent += data;
               
-              // 声明 displayContent 变量
               let displayContent = '';
               let shouldUpdate = false;
               
@@ -505,29 +501,115 @@ const ChatPage: React.FC = () => {
     }
   };
 
-    const handleModelChange = (value: string) => {
-      setModel(value);
-      
-      // 更新当前会话的模型
-      if (activeSessionId) {
-        const updatedSessions = sessions.map(session => {
-          if (session.id === activeSessionId) {
-            return {
-              ...session,
-              model: value
-            };
-          }
-          return session;
-        });
-        setSessions(updatedSessions);
-      }
-    };
+  const handleModelChange = (value: string) => {
+    setModel(value);
+    
+    // 更新当前会话的模型
+    if (activeSessionId) {
+      const updatedSessions = sessions.map(session => {
+        if (session.id === activeSessionId) {
+          return {
+            ...session,
+            model: value
+          };
+        }
+        return session;
+      });
+      setSessions(updatedSessions);
+    }
+  };
 
-    const handleRagSearch = async (query: string) => {
-      try {
-        setRagLoading(true);
-        setRagDrawerVisible(true);
+  // 修复的RAG检索函数 - 自动引用检索内容作为提示
+  const handleRagSearch = async (query: string) => {
+    if (!query.trim() || loading) return;
+    
+    try {
+      setLoading(true);
+      
+      // 先进行RAG检索
+      const ragResponse = await ragSearch(query);
+      
+      if (ragResponse.code === '00000' && ragResponse.data && ragResponse.data.final) {
+        const ragResults = ragResponse.data.final;
         
+        if (ragResults.length > 0) {
+          // 取前3个最相关的结果（按用户要求）
+          const topResults = ragResults.slice(0, 3);
+          
+          // 构建引用内容 - 移除内容截断限制
+          const references = topResults.map(([result, score]: [RagResult, number], index: number) => {
+            // 直接使用完整内容，不进行截断
+            let content = result.page_content || '';
+            
+            // 如果内容为空，记录错误并使用备用文本
+            if (!content || content.trim() === '') {
+              console.error(`引用${index + 1}的内容为空:`, result);
+              content = '内容获取失败，请检查数据源';
+            }
+            // 移除内容长度限制，保持完整性
+            
+            // 安全获取元数据
+            const metadata = result.metadata || {};
+            const title = metadata.title || '未命名文档';
+            const section = metadata.section || '未知章节';
+            const authors = metadata.authors || [];
+            const year = metadata.year || '未知';
+            
+            return `[引用${index + 1}] 《${title}》- ${section}
+作者: ${Array.isArray(authors) ? authors.join(', ') : '未知'}
+年份: ${year}
+相关度: ${(score * 100).toFixed(1)}%
+
+内容摘要:
+${content}
+
+---`;
+          }).join('\n\n');
+          
+          // 构建RAG增强的提示
+          const ragPrompt = `请基于以下知识库内容详细回答问题。请仔细阅读所有引用资料，综合分析后给出准确、全面的回答。
+
+【知识库参考资料】
+${references}
+
+【用户问题】
+${query}
+
+【回答要求】
+1. 请根据上述参考资料详细回答问题
+2. 在回答中适当引用具体的资料内容
+3. 在回答末尾明确标注所引用的资料来源
+4. 如果资料中有不同观点，请进行对比分析
+5. 如果资料不足以完全回答问题，请说明局限性`;
+          
+          // 发送RAG增强的消息
+          await handleSendMessage(ragPrompt);
+          
+          message.success(`已基于 ${topResults.length} 条知识库内容生成详细回答`);
+        } else {
+          message.warning('未找到相关知识库内容，将使用普通模式回答');
+          await handleSendMessage(query);
+        }
+      } else {
+        message.error(`检索失败: ${ragResponse.msg}，将使用普通模式回答`);
+        await handleSendMessage(query);
+      }
+    } catch (error) {
+      console.error('RAG检索错误:', error);
+      message.error('检索失败，将使用普通模式回答');
+      await handleSendMessage(query);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 知识库浏览功能 - 仅用于查看检索结果
+  const handleKnowledgeBaseSearch = async (query?: string) => {
+    try {
+      setRagLoading(true);
+      setRagDrawerVisible(true);
+      
+      if (query) {
         const response = await ragSearch(query);
         if (response.code === '00000' && response.data && response.data.final) {
           setRagResults(response.data.final);
@@ -535,197 +617,203 @@ const ChatPage: React.FC = () => {
           message.error(`检索失败: ${response.msg}`);
           setRagResults([]);
         }
-      } catch (error) {
-        console.error('RAG检索错误:', error);
-        message.error('检索失败，请重试');
-        setRagResults([]);
       }
-    };
+    } catch (error) {
+      console.error('知识库检索错误:', error);
+      message.error('检索失败，请重试');
+      setRagResults([]);
+    } finally {
+      setRagLoading(false);
+    }
+  };
 
-    return (
-      <Layout
-        sider={
-          <SessionList
-            sessions={sessions}
-            activeSessionId={activeSessionId}
-            onSelectSession={handleSelectSession}
-            onNewSession={handleNewSession}
-          />
-        }
-        header={
-          <HeaderContainer>
-            <Title level={4} style={{ margin: 0 }}>GeoGPT 聊天</Title>
-            <ControlsContainer>
-              <ModelSelector
-                value={model}
-                onChange={handleModelChange}
-                disabled={loading}
-              />
-              <Button
-                icon={<SearchOutlined />}
-                onClick={() => setRagDrawerVisible(true)}
-                disabled={!activeSessionId}
-              >
-                知识库
-              </Button>
-              <Button
-                icon={<SettingOutlined />}
-                onClick={() => setTokenModalVisible(true)}
-              >
-                设置
-              </Button>
-            </ControlsContainer>
-          </HeaderContainer>
-        }
-      >
-        {activeSessionId ? (
-          <>
-            <MessagesContainer>
-              <ChatContainer ref={chatContainerRef}>
-                {messages.map((msg) => (
-                  <ChatMessage
-                    key={msg.id}
-                    message={msg}
-                  />
-                ))}
-              </ChatContainer>
-            </MessagesContainer>
-            <InputContainer>
-              <ChatInput
-                onSend={handleSendMessage}
-                onSearch={handleRagSearch}
-                loading={loading}
-              />
-            </InputContainer>
-          </>
-        ) : (
-          <div style={{ 
-            textAlign: 'center', 
-            padding: '60px 20px',
-            maxWidth: '800px',
-            margin: '0 auto',
-            backgroundColor: '#fff',
-            borderRadius: '12px',
-            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.05)',
-          }}>
-            <Title level={2} style={{ marginBottom: '24px', color: '#1677ff' }}>欢迎使用 GeoGPT 聊天</Title>
-            
-            <div style={{ 
-              marginBottom: '40px', 
-              padding: '20px', 
-              backgroundColor: '#f0f7ff',
-              borderRadius: '8px',
-              textAlign: 'left'
-            }}>
-              <Title level={4}>使用指南：</Title>
-              <ul style={{ textAlign: 'left', lineHeight: '2' }}>
-                <li>点击下方的<strong>创建新会话</strong>按钮开始一个新的对话</li>
-                <li>您可以询问任何地理相关的问题，GeoGPT 将为您提供专业解答</li>
-                <li>使用知识库功能可以检索相关的专业资料</li>
-                <li>对话过程中会显示 AI 的思考过程，帮助您理解回答的推理过程</li>
-              </ul>
-            </div>
-            
-            <div style={{ 
-              marginBottom: '40px',
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'center',
-              gap: '20px'
-            }}>
-              <div style={{ 
-                width: '280px', 
-                padding: '20px', 
-                backgroundColor: '#f9f9f9',
-                borderRadius: '8px',
-                textAlign: 'left',
-                border: '1px solid #eee'
-              }}>
-                <Title level={5}>地理数据分析</Title>
-                <Text>「请帮我分析中国西部地区的地形特点及其对气候的影响」</Text>
-              </div>
-              
-              <div style={{ 
-                width: '280px', 
-                padding: '20px', 
-                backgroundColor: '#f9f9f9',
-                borderRadius: '8px',
-                textAlign: 'left',
-                border: '1px solid #eee'
-              }}>
-                <Title level={5}>地质知识咨询</Title>
-                <Text>「请解释板块构造理论及其对地震活动的影响」</Text>
-              </div>
-            </div>
-            
-            <Button 
-              type="primary" 
-              size="large" 
-              onClick={handleNewSession} 
-              style={{ 
-                marginTop: '16px',
-                height: '48px',
-                fontSize: '16px',
-                padding: '0 32px'
-              }}
+  // 在handleKnowledgeBaseSearch函数之后添加
+  const handleKnowledgeBaseClick = async () => {
+    if (currentInput.trim()) {
+      // 如果有输入内容，进行RAG检索并显示结果
+      await handleKnowledgeBaseSearch(currentInput.trim());
+    } else {
+      // 如果没有输入内容，只打开抽屉
+      setRagDrawerVisible(true);
+    }
+  };
+
+  return (
+    <Layout
+      sider={
+        <SessionList
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onSelectSession={handleSelectSession}
+          onNewSession={handleNewSession}
+        />
+      }
+      header={
+        <HeaderContainer>
+          <Title level={4} style={{ margin: 0 }}>GeoGPT 聊天</Title>
+          <ControlsContainer>
+            <ModelSelector
+              value={model}
+              onChange={handleModelChange}
+              disabled={loading}
+            />
+            <Button
+              icon={<SearchOutlined />}
+              onClick={handleKnowledgeBaseClick}
+              disabled={!activeSessionId}
             >
-              创建新会话
+              知识库
             </Button>
-          </div>
-        )}
-
-        {/* Token设置弹窗 */}
-        <Modal
-          title="访问令牌设置"
-          open={tokenModalVisible}
-          onOk={handleTokenSubmit}
-          onCancel={() => setTokenModalVisible(false)}
-        >
-          <Form form={form} layout="vertical" initialValues={{ token, useRag, useCommonRag }}>
-            <Form.Item
-              name="token"
-              label="访问令牌"
-              rules={[{ required: true, message: '请输入访问令牌' }]}
+            <Button
+              icon={<SettingOutlined />}
+              onClick={() => setTokenModalVisible(true)}
             >
-              <Input.Password placeholder="请输入GeoGPT访问令牌" />
-            </Form.Item>
-            <Form.Item name="useRag" valuePropName="checked" label="个人知识库RAG">
-              <Switch />
-            </Form.Item>
-            <Form.Item name="useCommonRag" valuePropName="checked" label="公共知识库RAG">
-              <Switch />
-            </Form.Item>
-          </Form>
-        </Modal>
+              设置
+            </Button>
+          </ControlsContainer>
+        </HeaderContainer>
+      }
+    >
+      {activeSessionId ? (
+        <>
+          <MessagesContainer>
+            <ChatContainer ref={chatContainerRef}>
+              {messages.map((msg) => (
+                <ChatMessage
+                  key={msg.id}
+                  message={msg}
+                />
+              ))}
+            </ChatContainer>
+          </MessagesContainer>
+          <InputContainer>
+            
+            <ChatInput
+              onSend={handleSendMessage}
+              onSearch={handleRagSearch}
+              onInputChange={setCurrentInput}
+              loading={loading}
+            />
+          </InputContainer>
+        </>
+      ) : (
+        <div style={{ 
+          textAlign: 'center', 
+          padding: '60px 20px',
+          maxWidth: '800px',
+          margin: '0 auto',
+          backgroundColor: '#fff',
+          borderRadius: '12px',
+          boxShadow: '0 4px 12px rgba(0, 0, 0, 0.05)',
+        }}>
+          <Title level={2} style={{ marginBottom: '24px', color: '#1677ff' }}>欢迎使用 GeoGPT 聊天</Title>
+          
+          <div style={{ 
+            marginBottom: '40px', 
+            padding: '20px', 
+            backgroundColor: '#f0f7ff',
+            borderRadius: '8px',
+            textAlign: 'left'
+          }}>
+            <Title level={4}>使用指南：</Title>
+            <ul style={{ textAlign: 'left', lineHeight: '2' }}>
+              <li>点击下方的<strong>创建新会话</strong>按钮开始一个新的对话</li>
+              <li>您可以询问任何地理相关的问题，GeoGPT 将为您提供专业解答</li>
+              <li>使用知识库功能可以检索相关的专业资料</li>
+              <li>对话过程中会显示 AI 的思考过程，帮助您理解回答的推理过程</li>
+            </ul>
+          </div>
+          
+          <div style={{ 
+            marginBottom: '40px',
+            display: 'flex',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
+            gap: '20px'
+          }}>
+            <div style={{ 
+              width: '280px', 
+              padding: '20px', 
+              backgroundColor: '#f9f9f9',
+              borderRadius: '8px',
+              textAlign: 'left',
+              border: '1px solid #eee'
+            }}>
+              <Title level={5}>地理数据分析</Title>
+              <Text>「请帮我分析中国西部地区的地形特点及其对气候的影响」</Text>
+            </div>
+            
+            <div style={{ 
+              width: '280px', 
+              padding: '20px', 
+              backgroundColor: '#f9f9f9',
+              borderRadius: '8px',
+              textAlign: 'left',
+              border: '1px solid #eee'
+            }}>
+              <Title level={5}>地质知识咨询</Title>
+              <Text>「请解释板块构造理论及其对地震活动的影响」</Text>
+            </div>
+          </div>
+          
+          <Button 
+            type="primary" 
+            size="large" 
+            onClick={handleNewSession} 
+            style={{ 
+              marginTop: '16px',
+              height: '48px',
+              fontSize: '16px',
+              padding: '0 32px'
+            }}
+          >
+            创建新会话
+          </Button>
+        </div>
+      )}
 
-        {/* RAG检索结果抽屉 */}
-        <Drawer
-          title="知识库检索结果"
-          placement="right"
-          width={400}
-          onClose={() => setRagDrawerVisible(false)}
-          open={ragDrawerVisible}
-        >
-          <RagResults results={ragResults} loading={ragLoading} />
-        </Drawer>
-      </Layout>
-    );
-  };
+      {/* Token设置弹窗 */}
+      <Modal
+        title="访问令牌设置"
+        open={tokenModalVisible}
+        onOk={handleTokenSubmit}
+        onCancel={() => setTokenModalVisible(false)}
+      >
+        <Form form={form} layout="vertical" initialValues={{ token, useRag, useCommonRag }}>
+          <Form.Item
+            name="token"
+            label="访问令牌"
+            rules={[{ required: true, message: '请输入访问令牌' }]}
+          >
+            <Input.Password placeholder="请输入访问令牌" />
+          </Form.Item>
+          <Form.Item name="useRag" valuePropName="checked">
+            <Switch /> 启用RAG检索
+          </Form.Item>
+          <Form.Item name="useCommonRag" valuePropName="checked">
+            <Switch /> 启用通用RAG
+          </Form.Item>
+        </Form>
+      </Modal>
 
-  const isValidEncodedString = (str: string): boolean => {
-    // 检查是否包含不完整的URI编码
-    return !/%(?![0-9A-Fa-f]{2})/g.test(str) && !/%[0-9A-Fa-f]$/g.test(str);
-  };
-
-  const safeDecodeURIComponent = (str: string): string => {
-  try {
-    return decodeURIComponent(str);
-  } catch (e) {
-    console.warn('URI解码失败，使用原始内容:', e);
-    return str; // ✅ 添加返回语句
-  }
+      {/* RAG检索结果抽屉 */}
+      <Drawer
+        title="知识库检索结果"
+        placement="right"
+        onClose={() => setRagDrawerVisible(false)}
+        open={ragDrawerVisible}
+        width={600}
+      >
+        <RagResults
+          results={ragResults}
+          loading={ragLoading}
+          onSearch={handleKnowledgeBaseSearch}
+        />
+      </Drawer>
+    </Layout>
+  );
 };
 
-  export default ChatPage;
+export default ChatPage;
 
   

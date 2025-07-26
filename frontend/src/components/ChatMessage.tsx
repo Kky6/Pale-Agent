@@ -77,37 +77,31 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
 
   // 处理思考过程和回复内容的分离显示
   const processMessageContent = (content: string) => {
-    // 检查是否包含思考过程
-    const thinkingRegex = /(💭 思考过程[^\n]*\n)([\s\S]*?)(?=\n\n---|$)/;
-    const match = content.match(thinkingRegex);
+    // 检查是否包含思考过程 - 修复正则表达式
+    const thinkingMatch = content.match(/(> 💭 \*\*思考过程：\*\*[\s\S]*?)\n\n---\n\n([\s\S]*)/); 
     
-    if (match) {
-      const thinkingHeader = match[1];
-      const thinkingContent = match[2];
-      const restContent = content.replace(match[0], '').replace(/^\n\n---\n\n/, '');
+    if (thinkingMatch) {
+      const thinkingSection = thinkingMatch[1];
+      const answerSection = thinkingMatch[2];
       
       return (
         <div>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: '#666' }}>
-            {thinkingHeader}
-          </div>
           <div style={{ 
-            color: '#888', 
+            color: '#666', 
             fontSize: '0.9em', 
             lineHeight: '1.5',
-            marginBottom: restContent ? '16px' : '0',
+            marginBottom: '16px',
             padding: '12px 16px',
             backgroundColor: '#f8f9fa',
             borderRadius: '8px',
-            borderLeft: '4px solid #e0e0e0',
+            borderLeft: '4px solid #1677ff',
             wordBreak: 'break-word',
             whiteSpace: 'pre-wrap'
           }}>
-            {thinkingContent}
+            <ReactMarkdown>{thinkingSection}</ReactMarkdown>
           </div>
-          {restContent && (
+          {answerSection && (
             <div>
-              <hr style={{ margin: '20px 0', border: 'none', borderTop: '1px solid #e9ecef' }} />
               <ReactMarkdown
                 components={{
                   p: ({ children }) => <p style={{ margin: '10px 0', lineHeight: '1.6', wordBreak: 'break-word' }}>{children}</p>,
@@ -164,7 +158,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
                   }
                 }}
               >
-                {restContent}
+                {answerSection}
               </ReactMarkdown>
             </div>
           )}
@@ -172,11 +166,11 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
       );
     }
     
-    // 如果没有思考过程，正常渲染
+    // 如果没有思考过程，正常渲染完整内容
     return (
       <ReactMarkdown
         components={{
-          p: ({ children }) => <p className="markdown-content">{children}</p>,
+          p: ({ children }) => <p style={{ margin: '10px 0', lineHeight: '1.6', wordBreak: 'break-word' }}>{children}</p>,
           pre: ({ children }) => (
             <pre style={{
               background: '#f0f2f5', 
