@@ -25,6 +25,7 @@ const StyledTextArea = styled(Input.TextArea)`
     padding: 12px 16px;
     font-size: 14px;
     line-height: 1.6;
+    min-height: 40px;
   }
   
   &:focus {
@@ -32,21 +33,60 @@ const StyledTextArea = styled(Input.TextArea)`
   }
 `;
 
-const RagButton = styled(Button)`
+// 创建统一的按钮基础样式
+const BaseButton = styled(Button)`
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+  padding: 0 16px;
+  
+  &:hover {
+    transform: translateY(-1px);
+  }
+  
+  &:active {
+    transform: translateY(0);
+  }
+`;
+
+const RagButton = styled(BaseButton)`
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   border: none;
   color: white;
-  font-weight: 500;
   
   &:hover {
     background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
     color: white;
-    transform: translateY(-1px);
     box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
   }
   
   &:disabled {
     background: #f5f5f5;
+    color: #bfbfbf;
+    transform: none;
+    box-shadow: none;
+  }
+`;
+
+const SendButton = styled(BaseButton)`
+  background: #1677ff;
+  border: 1px solid #1677ff;
+  color: white;
+  
+  &:hover {
+    background: #4096ff;
+    border-color: #4096ff;
+    color: white;
+    box-shadow: 0 4px 12px rgba(22, 119, 255, 0.3);
+  }
+  
+  &:disabled {
+    background: #f5f5f5;
+    border-color: #d9d9d9;
     color: #bfbfbf;
     transform: none;
     box-shadow: none;
@@ -92,7 +132,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onSearch, onInputChange, 
 
   return (
     <InputContainer>
-      <Space.Compact style={{ width: '100%' }}>
+      <Space.Compact style={{ width: '100%', display: 'flex', alignItems: 'stretch' }}>
         <StyledTextArea
           value={message}
           onChange={(e) => handleMessageChange(e.target.value)}
@@ -100,6 +140,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onSearch, onInputChange, 
           placeholder="输入问题，使用RAG检索获得更准确的答案..."
           autoSize={{ minRows: 1, maxRows: 4 }}
           disabled={loading}
+          style={{ flex: 1 }}
         />
         {onSearch && (
           <Tooltip title="RAG智能检索 - 基于知识库提供精准答案">
@@ -113,15 +154,14 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onSearch, onInputChange, 
             </RagButton>
           </Tooltip>
         )}
-        <Button 
-          type="primary" 
+        <SendButton 
           icon={<SendOutlined />} 
           onClick={handleSend} 
           disabled={!message.trim() || loading}
           style={{ marginLeft: 8 }}
         >
           发送
-        </Button>
+        </SendButton>
       </Space.Compact>
     </InputContainer>
   );

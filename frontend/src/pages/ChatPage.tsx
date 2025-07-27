@@ -38,7 +38,7 @@ const safeDecodeURIComponent = (str: string): string => {
       try {
         decoded = decoded
           .replace(/%20/g, ' ')
-          .replace(/%22/g, '\"')
+          .replace(/%22/g, '"')
           .replace(/%7B/g, '{')
           .replace(/%7D/g, '}')
           .replace(/%5B/g, '[')
@@ -198,6 +198,19 @@ const ChatPage: React.FC = () => {
     }
   }, [messages]);
 
+  // 同步消息到会话的函数
+  const syncMessagesToSession = (messagesToSync: Message[]) => {
+    if (activeSessionId && messagesToSync.length > 0) {
+      setSessions(prevSessions => 
+        prevSessions.map(session => 
+          session.id === activeSessionId
+            ? { ...session, messages: [...messagesToSync], updatedAt: Date.now() }
+            : session
+        )
+      );
+    }
+  };
+
   const handleTokenSubmit = () => {
     form.validateFields().then(values => {
       setToken(values.token);
@@ -210,6 +223,23 @@ const ChatPage: React.FC = () => {
   const handleNewSession = async () => {
     try {
       setLoading(true);
+      
+      // 在创建新会话前，先保存当前会话的消息
+      if (activeSessionId && messages.length > 0) {
+        setSessions(prevSessions => {
+          const updatedSessions = prevSessions.map(session => 
+            session.id === activeSessionId
+              ? { ...session, messages: [...messages], updatedAt: Date.now() }
+              : session
+          );
+          
+          // 保存到localStorage
+          localStorage.setItem('sessions', JSON.stringify(updatedSessions));
+          
+          return updatedSessions;
+        });
+      }
+      
       const response = await createChat();
       
       if (response.code === '00000') {
@@ -222,8 +252,15 @@ const ChatPage: React.FC = () => {
           model
         };
         
-        setSessions([newSession, ...sessions]);
+        setSessions(prevSessions => {
+          const updatedSessions = [newSession, ...prevSessions];
+          // 保存到localStorage
+          localStorage.setItem('sessions', JSON.stringify(updatedSessions));
+          return updatedSessions;
+        });
+        
         setActiveSessionId(newSession.id);
+        setMessages([]);
         message.success('创建会话成功');
       } else {
         message.error(`创建会话失败: ${response.msg}`);
@@ -237,16 +274,75 @@ const ChatPage: React.FC = () => {
   };
 
   const handleSelectSession = (sessionId: string) => {
+    // 如果是同一个会话，直接返回
+    if (activeSessionId === sessionId) {
+      return;
+    }
+
+    // 在切换前保存当前会话的消息
+    if (activeSessionId && messages.length > 0) {
+      setSessions(prevSessions => {
+        const updatedSessions = prevSessions.map(session => 
+          session.id === activeSessionId
+            ? { ...session, messages: [...messages], updatedAt: Date.now() }
+            : session
+        );
+        
+        // 保存到localStorage
+        localStorage.setItem('sessions', JSON.stringify(updatedSessions));
+        
+        return updatedSessions;
+      });
+    }
+    
+    // 直接切换会话ID，让useEffect处理消息加载
     setActiveSessionId(sessionId);
+  };
+
+  // 修复删除会话功能
+  const handleDeleteSession = (sessionId: string) => {
+    console.log('ChatPage: 删除会话', sessionId); // 添加调试日志
+    
+    setSessions(prevSessions => {
+      const newSessions = prevSessions.filter(session => session.id !== sessionId);
+      
+      // 如果删除的是当前激活的会话
+      if (sessionId === activeSessionId) {
+        if (newSessions.length > 0) {
+          // 切换到第一个会话
+          setActiveSessionId(newSessions[0].id);
+        } else {
+          // 没有会话了，清空状态
+          setActiveSessionId('');
+          setMessages([]);
+        }
+      }
+      
+      // 更新localStorage
+      if (newSessions.length === 0) {
+        localStorage.removeItem('sessions');
+      } else {
+        localStorage.setItem('sessions', JSON.stringify(newSessions));
+      }
+      
+      return newSessions;
+    });
+    
+    message.success('会话已删除');
   };
 
   const handleSendMessage = async (content: string) => {
     if (!content.trim() || loading) return;
   
+    // 为普通对话添加中文回答提示
+    const enhancedContent = content.includes('请') || content.includes('中文') || content.includes('用中文') 
+      ? content 
+      : `请用中文详细回答以下问题：\n\n${content}`;
+  
     const userMessage: Message = {
       id: uuidv4(),
       role: 'user',
-      content: content.trim(),
+      content: content.trim(), // 显示原始用户输入
       timestamp: Date.now()
     };
   
@@ -288,8 +384,8 @@ const ChatPage: React.FC = () => {
           );
         }
       }, 500); // 每500ms更新一次
-
-      await sendMessage(content, activeSessionId, model, {
+  
+      await sendMessage(enhancedContent, activeSessionId, model, {
         onData: (data) => {
           try {
             if (typeof data === 'string') {
@@ -462,26 +558,28 @@ const ChatPage: React.FC = () => {
           console.log('流式传输完成');
           setLoading(false);
           
-          setMessages(prevMessages => 
-            prevMessages.map(msg => 
-              msg.id === tempAiMessage.id 
-                ? { ...msg, isLoading: false }
-                : msg
-            )
-          );
+          const finalMessages = [...messages, userMessage, {
+            ...tempAiMessage,
+            content: currentAnswerContent || currentThinkingContent || '回答完成',
+            isLoading: false
+          }];
           
-          // 保存会话
+          setMessages(finalMessages);
+          
+          // 立即同步到会话并保存到localStorage
           if (activeSessionId) {
-            const finalContent = currentAnswerContent || currentThinkingContent || '回答完成';
-            const sessionPreview = finalContent.replace(/<[^>]*>/g, '').substring(0, 50) + '...';
-            
-            setSessions(prevSessions => 
-              prevSessions.map(session => 
+            setSessions(prevSessions => {
+              const updatedSessions = prevSessions.map(session => 
                 session.id === activeSessionId
-                  ? { ...session, preview: sessionPreview, updatedAt: Date.now() }
+                  ? { ...session, messages: finalMessages, updatedAt: Date.now() }
                   : session
-              )
-            );
+              );
+              
+              // 立即保存到localStorage
+              localStorage.setItem('sessions', JSON.stringify(updatedSessions));
+              
+              return updatedSessions;
+            });
           }
         }
       });
@@ -576,7 +674,7 @@ ${references}
 ${query}
 
 【回答要求】
-1. 请根据上述参考资料详细回答问题
+1. 请根据上述参考资料并结合你的知识用中文详细回答问题
 2. 在回答中适当引用具体的资料内容
 3. 在回答末尾明确标注所引用的资料来源
 4. 如果资料中有不同观点，请进行对比分析
@@ -646,11 +744,12 @@ ${query}
           activeSessionId={activeSessionId}
           onSelectSession={handleSelectSession}
           onNewSession={handleNewSession}
+          onDeleteSession={handleDeleteSession}
         />
       }
       header={
         <HeaderContainer>
-          <Title level={4} style={{ margin: 0 }}>GeoGPT 聊天</Title>
+          <Title level={4} style={{ margin: 0 }}>GeoGPT 古生物智能体</Title>
           <ControlsContainer>
             <ModelSelector
               value={model}
@@ -698,77 +797,342 @@ ${query}
         </>
       ) : (
         <div style={{ 
-          textAlign: 'center', 
-          padding: '60px 20px',
-          maxWidth: '800px',
-          margin: '0 auto',
-          backgroundColor: '#fff',
-          borderRadius: '12px',
-          boxShadow: '0 4px 12px rgba(0, 0, 0, 0.05)',
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+          alignItems: 'center',
+          padding: '30px 20px',
+          background: 'linear-gradient(135deg, #faf8f5 0%, #f0ede8 30%, #e8e0d6 70%, #ddd4c8 100%)',
+          position: 'relative',
+          overflow: 'auto',
+          animation: 'fadeIn 1s ease-in-out'
         }}>
-          <Title level={2} style={{ marginBottom: '24px', color: '#1677ff' }}>欢迎使用 GeoGPT 聊天</Title>
-          
-          <div style={{ 
-            marginBottom: '40px', 
-            padding: '20px', 
-            backgroundColor: '#f0f7ff',
-            borderRadius: '8px',
-            textAlign: 'left'
-          }}>
-            <Title level={4}>使用指南：</Title>
-            <ul style={{ textAlign: 'left', lineHeight: '2' }}>
-              <li>点击下方的<strong>创建新会话</strong>按钮开始一个新的对话</li>
-              <li>您可以询问任何地理相关的问题，GeoGPT 将为您提供专业解答</li>
-              <li>使用知识库功能可以检索相关的专业资料</li>
-              <li>对话过程中会显示 AI 的思考过程，帮助您理解回答的推理过程</li>
-            </ul>
-          </div>
-          
-          <div style={{ 
-            marginBottom: '40px',
+          {/* 动态背景装饰 */}
+          <div style={{
+            position: 'absolute',
+            top: '8%',
+            left: '5%',
+            width: '120px',
+            height: '120px',
             display: 'flex',
-            flexWrap: 'wrap',
+            alignItems: 'center',
             justifyContent: 'center',
-            gap: '20px'
+            background: 'radial-gradient(circle, rgba(139, 69, 19, 0.15) 0%, rgba(139, 69, 19, 0.08) 50%, rgba(139, 69, 19, 0.03) 80%, transparent 100%)',
+            borderRadius: '50%',
+            zIndex: 0,
+            animation: 'dinoFloat 4s ease-in-out infinite, dinoRotate 8s linear infinite',
+            boxShadow: '0 8px 25px rgba(139, 69, 19, 0.2), inset 0 2px 8px rgba(255, 255, 255, 0.3)',
+            border: '2px solid rgba(139, 69, 19, 0.2)',
+            backdropFilter: 'blur(5px)'
           }}>
-            <div style={{ 
-              width: '280px', 
-              padding: '20px', 
-              backgroundColor: '#f9f9f9',
-              borderRadius: '8px',
-              textAlign: 'left',
-              border: '1px solid #eee'
+            <div style={{
+              fontSize: '48px',
+              animation: 'dinoWiggle 2s ease-in-out infinite alternate',
+              filter: 'drop-shadow(2px 2px 4px rgba(139, 69, 19, 0.3))',
+              transform: 'rotate(-10deg)'
             }}>
-              <Title level={5}>地理数据分析</Title>
-              <Text>「请帮我分析中国西部地区的地形特点及其对气候的影响」</Text>
+              🦕
+            </div>
+          </div>
+          <div style={{
+            position: 'absolute',
+            bottom: '12%',
+            right: '8%',
+            width: '160px',
+            height: '160px',
+            background: 'radial-gradient(circle, rgba(212, 184, 150, 0.12) 0%, rgba(212, 184, 150, 0.06) 70%, transparent 100%)',
+            borderRadius: '50%',
+            zIndex: 0,
+            animation: 'float 8s ease-in-out infinite reverse'
+          }} />
+          <div style={{
+            position: 'absolute',
+            top: '20%',
+            right: '15%',
+            width: '80px',
+            height: '80px',
+            background: 'radial-gradient(circle, rgba(160, 82, 45, 0.08) 0%, transparent 70%)',
+            borderRadius: '50%',
+            zIndex: 0,
+            animation: 'pulse 4s ease-in-out infinite'
+          }} />
+          
+          <div style={{ 
+            maxWidth: '900px',
+            width: '100%',
+            backgroundColor: 'rgba(255, 255, 255, 0.95)',
+            borderRadius: '24px',
+            boxShadow: '0 12px 40px rgba(139, 69, 19, 0.15), 0 4px 12px rgba(0, 0, 0, 0.1)',
+            padding: '40px 35px',
+            backdropFilter: 'blur(15px)',
+            border: '1px solid rgba(212, 184, 150, 0.3)',
+            position: 'relative',
+            zIndex: 1,
+            maxHeight: 'calc(100vh - 160px)',
+            overflowY: 'auto',
+            animation: 'slideUp 0.8s ease-out'
+          }}>
+            {/* 标题区域 */}
+            <div style={{ textAlign: 'center', marginBottom: '35px' }}>
+              <Title level={1} style={{ 
+                marginBottom: '12px', 
+                color: '#8B4513',
+                fontSize: '2.2rem',
+                fontWeight: 'bold',
+                textShadow: '2px 2px 4px rgba(139, 69, 19, 0.1)',
+                animation: 'titleGlow 3s ease-in-out infinite alternate'
+              }}>
+                🦕 GeoGPT 古生物智能体
+              </Title>
+              <Text style={{ 
+                fontSize: '16px', 
+                color: '#5d4e37',
+                display: 'block',
+                fontStyle: 'italic',
+                opacity: 0.9
+              }}>
+                探索远古生命的奥秘，解读地球生物演化的历史
+              </Text>
             </div>
             
+            {/* 指南区域 */}
             <div style={{ 
-              width: '280px', 
-              padding: '20px', 
-              backgroundColor: '#f9f9f9',
-              borderRadius: '8px',
+              marginBottom: '35px', 
+              padding: '25px', 
+              backgroundColor: '#f5f3f0',
+              borderRadius: '16px',
               textAlign: 'left',
-              border: '1px solid #eee'
+              border: '2px solid #d4b896',
+              boxShadow: '0 4px 16px rgba(139, 69, 19, 0.08)',
+              transition: 'transform 0.3s ease, box-shadow 0.3s ease',
+              cursor: 'default'
             }}>
-              <Title level={5}>地质知识咨询</Title>
-              <Text>「请解释板块构造理论及其对地震活动的影响」</Text>
+              <Title level={3} style={{ color: '#8B4513', marginBottom: '16px', fontSize: '18px' }}>
+                🔍 探索指南
+              </Title>
+              <ul style={{ 
+                textAlign: 'left', 
+                lineHeight: '1.8', 
+                color: '#5d4e37',
+                fontSize: '15px',
+                paddingLeft: '20px',
+                margin: 0
+              }}>
+                <li style={{ marginBottom: '8px', transition: 'color 0.3s ease' }}>
+                  点击<strong>创建新会话</strong>开始古生物探索之旅
+                </li>
+                <li style={{ marginBottom: '8px', transition: 'color 0.3s ease' }}>
+                  询问古生物学、地质年代、化石相关的专业问题
+                </li>
+                <li style={{ marginBottom: '8px', transition: 'color 0.3s ease' }}>
+                  使用知识库功能检索专业文献和化石资料
+                </li>
+                <li style={{ transition: 'color 0.3s ease' }}>
+                  AI将展示详细推理过程，助您深入理解古生物学知识
+                </li>
+              </ul>
+            </div>
+            
+            {/* 示例卡片 */}
+            <div style={{ 
+              marginBottom: '35px',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+              gap: '20px'
+            }}>
+              <div style={{ 
+                padding: '20px', 
+                backgroundColor: '#faf8f5',
+                borderRadius: '16px',
+                textAlign: 'left',
+                border: '1px solid #d4b896',
+                boxShadow: '0 4px 12px rgba(139, 69, 19, 0.1)',
+                transition: 'all 0.3s ease',
+                cursor: 'pointer',
+                position: 'relative',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  background: 'linear-gradient(45deg, transparent 0%, rgba(139, 69, 19, 0.05) 50%, transparent 100%)',
+                  transform: 'translateX(-100%)',
+                  transition: 'transform 0.6s ease'
+                }} />
+                <Title level={4} style={{ color: '#8B4513', marginBottom: '10px', fontSize: '16px', position: 'relative', zIndex: 1 }}>
+                  🦴 化石分析
+                </Title>
+                <Text style={{ color: '#5d4e37', fontSize: '14px', lineHeight: '1.5', position: 'relative', zIndex: 1 }}>
+                  「请帮我分析三叶虫化石的形态特征及其在寒武纪的生态意义」
+                </Text>
+              </div>
+              
+              <div style={{ 
+                padding: '20px', 
+                backgroundColor: '#faf8f5',
+                borderRadius: '16px',
+                textAlign: 'left',
+                border: '1px solid #d4b896',
+                boxShadow: '0 4px 12px rgba(139, 69, 19, 0.1)',
+                transition: 'all 0.3s ease',
+                cursor: 'pointer',
+                position: 'relative',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  background: 'linear-gradient(45deg, transparent 0%, rgba(139, 69, 19, 0.05) 50%, transparent 100%)',
+                  transform: 'translateX(-100%)',
+                  transition: 'transform 0.6s ease'
+                }} />
+                <Title level={4} style={{ color: '#8B4513', marginBottom: '10px', fontSize: '16px', position: 'relative', zIndex: 1 }}>
+                  🌍 地质年代
+                </Title>
+                <Text style={{ color: '#5d4e37', fontSize: '14px', lineHeight: '1.5', position: 'relative', zIndex: 1 }}>
+                  「请解释白垩纪末期大灭绝事件的成因及其对生物演化的影响」
+                </Text>
+              </div>
+              
+              <div style={{ 
+                padding: '20px', 
+                backgroundColor: '#faf8f5',
+                borderRadius: '16px',
+                textAlign: 'left',
+                border: '1px solid #d4b896',
+                boxShadow: '0 4px 12px rgba(139, 69, 19, 0.1)',
+                transition: 'all 0.3s ease',
+                cursor: 'pointer',
+                position: 'relative',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  background: 'linear-gradient(45deg, transparent 0%, rgba(139, 69, 19, 0.05) 50%, transparent 100%)',
+                  transform: 'translateX(-100%)',
+                  transition: 'transform 0.6s ease'
+                }} />
+                <Title level={4} style={{ color: '#8B4513', marginBottom: '10px', fontSize: '16px', position: 'relative', zIndex: 1 }}>
+                  🧬 演化研究
+                </Title>
+                <Text style={{ color: '#5d4e37', fontSize: '14px', lineHeight: '1.5', position: 'relative', zIndex: 1 }}>
+                  「请分析恐龙向鸟类演化的关键证据和过渡化石」
+                </Text>
+              </div>
+            </div>
+            
+            {/* 按钮区域 */}
+            <div style={{ textAlign: 'center' }}>
+              <Button 
+                type="primary" 
+                size="large" 
+                onClick={handleNewSession} 
+                style={{ 
+                  height: '52px',
+                  fontSize: '17px',
+                  padding: '0 40px',
+                  borderRadius: '26px',
+                  background: 'linear-gradient(135deg, #8B4513 0%, #A0522D 50%, #8B4513 100%)',
+                  border: 'none',
+                  boxShadow: '0 6px 20px rgba(139, 69, 19, 0.3)',
+                  fontWeight: '600',
+                  transition: 'all 0.3s ease',
+                  position: 'relative',
+                  overflow: 'hidden'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-3px) scale(1.02)';
+                  e.currentTarget.style.boxShadow = '0 8px 25px rgba(139, 69, 19, 0.4)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0) scale(1)';
+                  e.currentTarget.style.boxShadow = '0 6px 20px rgba(139, 69, 19, 0.3)';
+                }}
+              >
+                <span style={{ position: 'relative', zIndex: 1 }}>🚀 开始探索古生物世界</span>
+              </Button>
             </div>
           </div>
           
-          <Button 
-            type="primary" 
-            size="large" 
-            onClick={handleNewSession} 
-            style={{ 
-              marginTop: '16px',
-              height: '48px',
-              fontSize: '16px',
-              padding: '0 32px'
-            }}
-          >
-            创建新会话
-          </Button>
+          {/* CSS动画样式 */}
+          <style>{`
+            @keyframes fadeIn {
+              from { opacity: 0; }
+              to { opacity: 1; }
+            }
+            
+            @keyframes slideUp {
+              from { 
+                opacity: 0;
+                transform: translateY(30px);
+              }
+              to { 
+                opacity: 1;
+                transform: translateY(0);
+              }
+            }
+            
+            @keyframes float {
+              0%, 100% { transform: translateY(0px) rotate(0deg); }
+              50% { transform: translateY(-20px) rotate(180deg); }
+            }
+            
+            @keyframes dinoFloat {
+              0%, 100% { transform: translateY(0px); }
+              50% { transform: translateY(-15px); }
+            }
+            
+            @keyframes dinoRotate {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+            
+            @keyframes dinoWiggle {
+              0% { transform: rotate(-10deg) scale(1); }
+              100% { transform: rotate(-5deg) scale(1.1); }
+            }
+            
+            @keyframes pulse {
+              0%, 100% { transform: scale(1); opacity: 0.8; }
+              50% { transform: scale(1.1); opacity: 1; }
+            }
+            
+            @keyframes titleGlow {
+              from { text-shadow: 2px 2px 4px rgba(139, 69, 19, 0.1); }
+              to { text-shadow: 2px 2px 8px rgba(139, 69, 19, 0.2), 0 0 10px rgba(139, 69, 19, 0.1); }
+            }
+            
+            /* 卡片悬停效果 */
+            div[style*="cursor: pointer"]:hover {
+              transform: translateY(-5px) !important;
+              box-shadow: 0 8px 25px rgba(139, 69, 19, 0.2) !important;
+            }
+            
+            div[style*="cursor: pointer"]:hover > div {
+              transform: translateX(0%) !important;
+            }
+            
+            /* 指南区域悬停效果 */
+            div[style*="cursor: default"]:hover {
+              transform: scale(1.02) !important;
+              box-shadow: 0 6px 20px rgba(139, 69, 19, 0.12) !important;
+            }
+            
+            div[style*="cursor: default"]:hover li {
+              color: #8B4513 !important;
+            }
+          `}</style>
         </div>
       )}
 
@@ -815,5 +1179,3 @@ ${query}
 };
 
 export default ChatPage;
-
-  
