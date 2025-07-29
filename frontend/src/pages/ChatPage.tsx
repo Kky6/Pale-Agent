@@ -631,8 +631,8 @@ const ChatPage: React.FC = () => {
         const ragResults = ragResponse.data.final;
         
         if (ragResults.length > 0) {
-          // 取前3个最相关的结果（按用户要求）
-          const topResults = ragResults.slice(0, 3);
+          // 取前5个最相关的结果
+          const topResults = ragResults.slice(0, 5);
           
           // 构建引用内容 - 移除内容截断限制
           const references = topResults.map(([result, score]: [RagResult, number], index: number) => {
@@ -665,7 +665,7 @@ ${content}
           }).join('\n\n');
           
           // 构建RAG增强的提示
-          const ragPrompt = `请基于以下知识库内容详细回答问题。请仔细阅读所有引用资料，综合分析后给出准确、全面的回答。
+          const ragPrompt = `请参考以下知识库内容详细回答问题。请仔细阅读所有引用资料，综合分析后给出准确、全面的回答。
 
 【知识库参考资料】
 ${references}
